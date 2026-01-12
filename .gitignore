@@ -1,0 +1,8 @@
+artifacts
+node_modules
+dist
+.env
+.vscode
+.DS_Store
+main
+AGENTS.md

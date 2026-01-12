@@ -1,0 +1,16 @@
+{
+  "name": "bcindex-hardhat",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "chain": "hardhat node",
+    "deploy": "hardhat run scripts/deploy.ts --network localhost",
+    "emit": "hardhat run scripts/emit_logs.ts --network localhost"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
