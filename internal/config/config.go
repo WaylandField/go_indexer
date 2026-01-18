@@ -10,15 +10,20 @@ import (
 )
 
 type Config struct {
-	RPCURL          string
-	DBPath          string
-	HTTPAddr        string
-	ContractAddress string
-	Topic0          string
-	StartBlock      uint64
-	Confirmations   uint64
-	BatchSize       uint64
-	PollInterval    time.Duration
+	RPCURL           string
+	DBDSN            string
+	StateDBDSN       string
+	HTTPAddr         string
+	ContractAddress  string
+	Topic0           string
+	StartBlock       uint64
+	Confirmations    uint64
+	BatchSize        uint64
+	PollInterval     time.Duration
+	KafkaBrokers     []string
+	KafkaTopicPrefix string
+	KafkaGroupID     string
+	ChainIDs         []uint64
 }
 
 type EnvSource interface {
@@ -79,9 +84,14 @@ func Load(source EnvSource) (Config, error) {
 		pollInterval = duration
 	}
 
-	dbPath, ok := source.Lookup("DB_PATH")
-	if !ok || dbPath == "" {
-		dbPath = "indexer.db"
+	dbDSN, ok := source.Lookup("DB_DSN")
+	if !ok || strings.TrimSpace(dbDSN) == "" {
+		dbDSN = "root:@tcp(127.0.0.1:3306)/bcindex?parseTime=true&multiStatements=true"
+	}
+
+	stateDBDSN := dbDSN
+	if raw, ok := source.Lookup("STATE_DB_DSN"); ok && strings.TrimSpace(raw) != "" {
+		stateDBDSN = raw
 	}
 
 	httpAddr := ":8080"
@@ -92,16 +102,38 @@ func Load(source EnvSource) (Config, error) {
 	contractAddress, _ := source.Lookup("CONTRACT_ADDRESS")
 	topic0, _ := source.Lookup("TOPIC0")
 
+	kafkaBrokers, err := parseList(source, "KAFKA_BROKERS", "localhost:9092")
+	if err != nil {
+		return Config{}, err
+	}
+	kafkaTopicPrefix, ok := source.Lookup("KAFKA_TOPIC_PREFIX")
+	if !ok || kafkaTopicPrefix == "" {
+		kafkaTopicPrefix = "bcindex-logs"
+	}
+	kafkaGroupID, ok := source.Lookup("KAFKA_GROUP_ID")
+	if !ok || kafkaGroupID == "" {
+		kafkaGroupID = "bcindex-compute"
+	}
+	chainIDs, err := parseUintList(source, "CHAIN_IDS")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
-		RPCURL:          rpcURL,
-		DBPath:          dbPath,
-		HTTPAddr:        httpAddr,
-		ContractAddress: contractAddress,
-		Topic0:          topic0,
-		StartBlock:      startBlock,
-		Confirmations:   confirmations,
-		BatchSize:       batchSize,
-		PollInterval:    pollInterval,
+		RPCURL:           rpcURL,
+		DBDSN:            dbDSN,
+		StateDBDSN:       stateDBDSN,
+		HTTPAddr:         httpAddr,
+		ContractAddress:  contractAddress,
+		Topic0:           topic0,
+		StartBlock:       startBlock,
+		Confirmations:    confirmations,
+		BatchSize:        batchSize,
+		PollInterval:     pollInterval,
+		KafkaBrokers:     kafkaBrokers,
+		KafkaTopicPrefix: kafkaTopicPrefix,
+		KafkaGroupID:     kafkaGroupID,
+		ChainIDs:         chainIDs,
 	}, nil
 }
 
@@ -115,4 +147,45 @@ func parseUintEnv(source EnvSource, key string, defaultValue uint64) (uint64, er
 		return 0, fmt.Errorf("invalid %s: %w", key, err)
 	}
 	return value, nil
+}
+
+func parseList(source EnvSource, key string, defaultValue string) ([]string, error) {
+	raw, ok := source.Lookup(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		raw = defaultValue
+	}
+	items := strings.Split(raw, ",")
+	var values []string
+	for _, item := range items {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s is required", key)
+	}
+	return values, nil
+}
+
+func parseUintList(source EnvSource, key string) ([]uint64, error) {
+	raw, ok := source.Lookup(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	items := strings.Split(raw, ",")
+	values := make([]uint64, 0, len(items))
+	for _, item := range items {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s: %w", key, err)
+		}
+		values = append(values, parsed)
+	}
+	return values, nil
 }

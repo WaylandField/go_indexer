@@ -1,4 +1,4 @@
-package sqlite
+package mysql
 
 import (
 	"context"
@@ -6,25 +6,29 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
 	"bcindex/internal/application"
 	"bcindex/internal/domain"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 type Repository struct {
 	db *sql.DB
 }
 
-func NewRepository(dbPath string) (*Repository, error) {
-	if dbPath == "" {
-		return nil, errors.New("db path is required")
+func NewRepository(dsn string) (*Repository, error) {
+	if dsn == "" {
+		return nil, errors.New("db dsn is required")
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
 		return nil, err
 	}
 	if err := createSchema(db); err != nil {
@@ -36,26 +40,37 @@ func NewRepository(dbPath string) (*Repository, error) {
 func createSchema(db *sql.DB) error {
 	schema := []string{
 		`CREATE TABLE IF NOT EXISTS logs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			chain_id INTEGER NOT NULL DEFAULT 0,
-			block_number INTEGER NOT NULL,
-			block_hash TEXT NOT NULL DEFAULT '',
-			tx_hash TEXT NOT NULL,
-			log_index INTEGER NOT NULL,
-			address TEXT NOT NULL,
-			data TEXT NOT NULL,
-			topics TEXT NOT NULL,
-			removed INTEGER NOT NULL
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			chain_id BIGINT UNSIGNED NOT NULL,
+			block_number BIGINT UNSIGNED NOT NULL,
+			block_hash VARCHAR(66) NOT NULL,
+			tx_hash VARCHAR(66) NOT NULL,
+			log_index BIGINT UNSIGNED NOT NULL,
+			address VARCHAR(42) NOT NULL,
+			data MEDIUMTEXT NOT NULL,
+			topics MEDIUMTEXT NOT NULL,
+			removed TINYINT(1) NOT NULL,
+			PRIMARY KEY (id),
+			UNIQUE KEY logs_unique (chain_id, block_hash, block_number, tx_hash, log_index),
+			KEY logs_block_idx (chain_id, block_number),
+			KEY logs_address_idx (chain_id, address)
 		)`,
 		`CREATE TABLE IF NOT EXISTS blocks (
-			chain_id INTEGER NOT NULL,
-			block_number INTEGER NOT NULL,
-			block_hash TEXT NOT NULL,
-			PRIMARY KEY(chain_id, block_number)
+			chain_id BIGINT UNSIGNED NOT NULL,
+			block_number BIGINT UNSIGNED NOT NULL,
+			block_hash VARCHAR(66) NOT NULL,
+			PRIMARY KEY (chain_id, block_number)
+		)`,
+		`CREATE TABLE IF NOT EXISTS balances (
+			chain_id BIGINT UNSIGNED NOT NULL,
+			address VARCHAR(42) NOT NULL,
+			balance DECIMAL(65,0) NOT NULL,
+			PRIMARY KEY (chain_id, address)
 		)`,
 		`CREATE TABLE IF NOT EXISTS state (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
+			state_key VARCHAR(64) NOT NULL,
+			state_value VARCHAR(64) NOT NULL,
+			PRIMARY KEY (state_key)
 		)`,
 	}
 	for _, stmt := range schema {
@@ -63,46 +78,30 @@ func createSchema(db *sql.DB) error {
 			return err
 		}
 	}
-	if err := ensureColumn(db, "logs", "chain_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+	if err := ensureColumn(db, "logs", "chain_id", "BIGINT UNSIGNED NOT NULL"); err != nil {
 		return err
 	}
-	if err := ensureColumn(db, "logs", "block_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS logs_unique ON logs (chain_id, block_hash, block_number, tx_hash, log_index)`); err != nil {
+	if err := ensureColumn(db, "logs", "block_hash", "VARCHAR(66) NOT NULL"); err != nil {
 		return err
 	}
 	return nil
 }
 
 func ensureColumn(db *sql.DB, table, column, definition string) error {
-	query := fmt.Sprintf("PRAGMA table_info(%s)", table)
-	rows, err := db.Query(query)
-	if err != nil {
+	var count int
+	row := db.QueryRow(
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+		table,
+		column,
+	)
+	if err := row.Scan(&count); err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name string
-		var ctype string
-		var notnull int
-		var dflt sql.NullString
-		var pk int
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return err
-		}
-		if name == column {
-			return nil
-		}
+	if count > 0 {
+		return nil
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
 	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)
-	_, err = db.Exec(stmt)
+	_, err := db.Exec(stmt)
 	return err
 }
 
@@ -117,9 +116,8 @@ func (r *Repository) StoreLogs(ctx context.Context, logs []domain.LogEntry) erro
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO logs (chain_id, block_number, block_hash, tx_hash, log_index, address, data, topics, removed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(chain_id, block_hash, block_number, tx_hash, log_index) DO NOTHING`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT IGNORE INTO logs (chain_id, block_number, block_hash, tx_hash, log_index, address, data, topics, removed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -158,7 +156,7 @@ func (r *Repository) StoreBlocks(ctx context.Context, blocks []domain.BlockRecor
 	}
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO blocks (chain_id, block_number, block_hash)
 		VALUES (?, ?, ?)
-		ON CONFLICT(chain_id, block_number) DO UPDATE SET block_hash = excluded.block_hash`)
+		ON DUPLICATE KEY UPDATE block_hash = VALUES(block_hash)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -207,8 +205,8 @@ func (r *Repository) QueryLogs(ctx context.Context, filter application.LogQueryF
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	clauses := make([]string, 0, 4)
-	args := make([]any, 0, 5)
+	clauses := make([]string, 0, 5)
+	args := make([]any, 0, 6)
 
 	if filter.Address != "" {
 		clauses = append(clauses, "address = ?")
@@ -269,12 +267,52 @@ func (r *Repository) QueryLogs(ctx context.Context, filter application.LogQueryF
 	return logs, nil
 }
 
+func (r *Repository) QueryLogsAfter(ctx context.Context, chainID uint64, afterBlock uint64, afterLogIndex uint64, limit int) ([]domain.LogEntry, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if limit <= 0 || limit > 5000 {
+		limit = 1000
+	}
+	query := `SELECT chain_id, block_number, block_hash, tx_hash, log_index, address, data, topics, removed
+		FROM logs
+		WHERE chain_id = ?
+		AND (block_number > ? OR (block_number = ? AND log_index > ?))
+		ORDER BY block_number ASC, log_index ASC
+		LIMIT ?`
+
+	rows, err := r.db.QueryContext(ctx, query, chainID, afterBlock, afterBlock, afterLogIndex, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []domain.LogEntry
+	for rows.Next() {
+		var log domain.LogEntry
+		var topicsRaw string
+		var removed int
+		if err := rows.Scan(&log.ChainID, &log.BlockNumber, &log.BlockHash, &log.TxHash, &log.LogIndex, &log.Address, &log.Data, &topicsRaw, &removed); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(topicsRaw), &log.Topics); err != nil {
+			return nil, err
+		}
+		log.Removed = removed != 0
+		logs = append(logs, log)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return logs, nil
+}
+
 func (r *Repository) QueryTransactions(ctx context.Context, filter application.TransactionQueryFilter) ([]domain.TransactionSummary, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	clauses := make([]string, 0, 4)
-	args := make([]any, 0, 5)
+	clauses := make([]string, 0, 5)
+	args := make([]any, 0, 6)
 
 	if filter.Address != "" {
 		clauses = append(clauses, "address = ?")
@@ -329,6 +367,54 @@ func (r *Repository) QueryTransactions(ctx context.Context, filter application.T
 	return transactions, nil
 }
 
+func (r *Repository) QueryBalances(ctx context.Context, filter application.BalanceQueryFilter) ([]domain.Balance, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 3)
+
+	if filter.Address != "" {
+		clauses = append(clauses, "address = ?")
+		args = append(args, strings.ToLower(filter.Address))
+	}
+	if filter.ChainID != nil {
+		clauses = append(clauses, "chain_id = ?")
+		args = append(args, *filter.ChainID)
+	}
+
+	query := `SELECT chain_id, address, balance FROM balances`
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY chain_id ASC, address ASC LIMIT ?"
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	args = append(args, limit)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var balances []domain.Balance
+	for rows.Next() {
+		var balance domain.Balance
+		if err := rows.Scan(&balance.ChainID, &balance.Address, &balance.Balance); err != nil {
+			return nil, err
+		}
+		balances = append(balances, balance)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return balances, nil
+}
+
 func (r *Repository) BlockRange(ctx context.Context, chainID *uint64) (uint64, uint64, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -353,7 +439,7 @@ func (r *Repository) BlockRange(ctx context.Context, chainID *uint64) (uint64, u
 func (r *Repository) LastProcessedBlock(ctx context.Context, chainID uint64) (uint64, bool, error) {
 	var value string
 	key := stateKey(chainID)
-	if err := r.db.QueryRowContext(ctx, `SELECT value FROM state WHERE key = ?`, key).Scan(&value); err != nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT state_value FROM state WHERE state_key = ?`, key).Scan(&value); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, false, nil
 		}
@@ -368,15 +454,21 @@ func (r *Repository) LastProcessedBlock(ctx context.Context, chainID uint64) (ui
 
 func (r *Repository) SetLastProcessedBlock(ctx context.Context, chainID uint64, block uint64) error {
 	key := stateKey(chainID)
-	_, err := r.db.ExecContext(ctx, `INSERT INTO state (key, value) VALUES (?, ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, fmt.Sprintf("%d", block))
+	_, err := r.db.ExecContext(ctx, `INSERT INTO state (state_key, state_value) VALUES (?, ?)
+		ON DUPLICATE KEY UPDATE state_value = VALUES(state_value)`, key, fmt.Sprintf("%d", block))
 	return err
 }
 
 func (r *Repository) ClearLastProcessedBlock(ctx context.Context, chainID uint64) error {
 	key := stateKey(chainID)
-	_, err := r.db.ExecContext(ctx, `DELETE FROM state WHERE key = ?`, key)
+	_, err := r.db.ExecContext(ctx, `DELETE FROM state WHERE state_key = ?`, key)
 	return err
+}
+
+func (r *Repository) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return r.db.PingContext(ctx)
 }
 
 func stateKey(chainID uint64) string {
@@ -386,8 +478,22 @@ func stateKey(chainID uint64) string {
 	return fmt.Sprintf("last_block:%d", chainID)
 }
 
-func (r *Repository) Ping(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+func (r *Repository) AddBalanceDelta(ctx context.Context, chainID uint64, address string, delta *big.Int) error {
+	if delta == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return r.db.PingContext(ctx)
+
+	_, err := r.db.ExecContext(ctx, `INSERT INTO balances (chain_id, address, balance)
+		VALUES (?, ?, ?)
+		ON DUPLICATE KEY UPDATE balance = balance + VALUES(balance)`, chainID, strings.ToLower(address), delta.String())
+	return err
+}
+
+func (r *Repository) ResetBalances(ctx context.Context, chainID uint64) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := r.db.ExecContext(ctx, `DELETE FROM balances WHERE chain_id = ?`, chainID)
+	return err
 }

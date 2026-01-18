@@ -6,3 +6,5 @@ dist
 .DS_Store
 main
 AGENTS.md
+bin
+cache
