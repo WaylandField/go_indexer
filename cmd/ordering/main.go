@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"bcindex/internal/application"
 	"bcindex/internal/config"
 	"bcindex/internal/infrastructure/ethrpc"
 	"bcindex/internal/infrastructure/kafka"
 	"bcindex/internal/infrastructure/mysql"
+	"bcindex/internal/infrastructure/telemetry"
 )
 
 func main() {
@@ -44,11 +46,26 @@ func main() {
 	}
 	defer producer.Close()
 
+	shutdownTracing, err := telemetry.InitTracer(context.Background(), "bcindex-ordering", cfg.OtelEndpoint)
+	if err != nil {
+		log.Printf("tracing init error: %v", err)
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(ctx); err != nil {
+				log.Printf("tracing shutdown error: %v", err)
+			}
+		}()
+	}
+
 	indexer, err := application.NewIndexer(rpcClient, producer, stateRepo, stateRepo, orderingObserver{}, application.IndexerConfig{
-		StartBlock:    cfg.StartBlock,
-		Confirmations: cfg.Confirmations,
-		PollInterval:  cfg.PollInterval,
-		BatchSize:     cfg.BatchSize,
+		StartBlock:        cfg.StartBlock,
+		Confirmations:     cfg.Confirmations,
+		PollInterval:      cfg.PollInterval,
+		BatchSize:         cfg.BatchSize,
+		LogFetchChunkSize: cfg.LogFetchChunkSize,
+		LogFetchWorkers:   cfg.LogFetchWorkers,
 	})
 	if err != nil {
 		log.Fatalf("indexer error: %v", err)

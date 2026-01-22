@@ -15,10 +15,15 @@ import (
 	"bcindex/internal/config"
 	"bcindex/internal/infrastructure/ethrpc"
 	"bcindex/internal/infrastructure/mysql"
+	"bcindex/internal/infrastructure/telemetry"
 	"bcindex/internal/interfaces/httpapi"
 	"bcindex/internal/streaming"
 
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -33,9 +38,35 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	repo, err := mysql.NewRepository(cfg.DBDSN)
+	baseRepo, err := mysql.NewRepository(cfg.DBDSN)
 	if err != nil {
 		log.Fatalf("db error: %v", err)
+	}
+	var (
+		repo  application.ComputeBalanceRepository = baseRepo
+		store httpapi.LogStore                     = baseRepo
+	)
+	if cachedRepo, err := mysql.NewCachedRepository(baseRepo, mysql.CacheConfig{
+		Addr: cfg.RedisAddr,
+		TTL:  time.Hour,
+	}); err != nil {
+		log.Printf("redis cache disabled: %v", err)
+	} else if cachedRepo != nil {
+		repo = cachedRepo
+		store = cachedRepo
+	}
+
+	shutdownTracing, err := telemetry.InitTracer(context.Background(), "bcindex-compute", cfg.OtelEndpoint)
+	if err != nil {
+		log.Printf("tracing init error: %v", err)
+	} else {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(ctx); err != nil {
+				log.Printf("tracing shutdown error: %v", err)
+			}
+		}()
 	}
 
 	rpcClient, err := ethrpc.NewClient(ethrpc.Config{
@@ -51,7 +82,7 @@ func main() {
 	if len(cfg.ChainIDs) > 0 {
 		var maxProcessed uint64
 		for _, chainID := range cfg.ChainIDs {
-			if last, ok, err := repo.LastProcessedBlock(context.Background(), chainID); err == nil && ok {
+			if last, ok, err := store.LastProcessedBlock(context.Background(), chainID); err == nil && ok {
 				if last > maxProcessed {
 					maxProcessed = last
 				}
@@ -62,7 +93,7 @@ func main() {
 		}
 	}
 
-	httpServer, err := httpapi.NewServer(cfg, repo, rpcClient, metrics, httpapi.BuildInfo{
+	httpServer, err := httpapi.NewServer(cfg, store, rpcClient, metrics, httpapi.BuildInfo{
 		Version:   version,
 		Commit:    commit,
 		BuildTime: buildTime,
@@ -115,6 +146,7 @@ func main() {
 }
 
 func consumeStream(ctx context.Context, reader *kafka.Reader, repo application.ComputeBalanceRepository, metrics *httpapi.Metrics, chainID uint64, cfg config.Config) {
+	tracer := otel.Tracer("bcindex/compute")
 	var (
 		messageCount uint64
 		logCount     uint64
@@ -147,16 +179,38 @@ func consumeStream(ctx context.Context, reader *kafka.Reader, repo application.C
 			log.Printf("unexpected chain_id %d on topic", decoded.ChainID)
 		}
 
-		if err := application.ApplyMessage(ctx, repo, decoded); err != nil {
+		messageCtx := telemetry.ExtractKafkaHeaders(ctx, message.Headers)
+		if !trace.SpanContextFromContext(messageCtx).IsValid() && decoded.TraceID != "" {
+			if ctxWithTrace, ok := telemetry.ContextWithTraceID(messageCtx, decoded.TraceID); ok {
+				messageCtx = ctxWithTrace
+			}
+		}
+		messageCtx, span := tracer.Start(messageCtx, "compute.process_message", trace.WithSpanKind(trace.SpanKindConsumer))
+		span.SetAttributes(
+			attribute.String("message.type", string(decoded.Type)),
+			attribute.Int64("chain.id", int64(decoded.ChainID)),
+		)
+		if decoded.BlockNumber != 0 {
+			span.SetAttributes(attribute.Int64("block.number", int64(decoded.BlockNumber)))
+		}
+		if decoded.TxHash != "" {
+			span.SetAttributes(attribute.String("tx.hash", decoded.TxHash))
+		}
+
+		if err := application.ApplyMessage(messageCtx, repo, decoded); err != nil {
 			log.Printf("apply message error: %v", err)
 			metrics.IncKafkaApplyErr()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.End()
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
-		if err := application.ApplyBalanceForMessage(ctx, repo, decoded, cfg); err != nil {
+		if err := application.ApplyBalanceForMessage(messageCtx, repo, decoded, cfg); err != nil {
 			log.Printf("balance update error: %v", err)
 		}
+		span.End()
 
 		messageCount++
 		lastType = decoded.Type

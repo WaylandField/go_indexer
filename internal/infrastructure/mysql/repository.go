@@ -14,6 +14,10 @@ import (
 	"bcindex/internal/domain"
 
 	_ "github.com/go-sql-driver/mysql"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Repository struct {
@@ -109,17 +113,23 @@ func (r *Repository) StoreLogs(ctx context.Context, logs []domain.LogEntry) erro
 	if len(logs) == 0 {
 		return nil
 	}
+	ctx, span := startDBSpan(ctx, "mysql.StoreLogs", attribute.Int("log.count", len(logs)))
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 	stmt, err := tx.PrepareContext(ctx, `INSERT IGNORE INTO logs (chain_id, block_number, block_hash, tx_hash, log_index, address, data, topics, removed)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 	defer stmt.Close()
@@ -128,6 +138,8 @@ func (r *Repository) StoreLogs(ctx context.Context, logs []domain.LogEntry) erro
 		topics, err := json.Marshal(log.Topics)
 		if err != nil {
 			_ = tx.Rollback()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
 		removed := 0
@@ -136,22 +148,33 @@ func (r *Repository) StoreLogs(ctx context.Context, logs []domain.LogEntry) erro
 		}
 		if _, err := stmt.ExecContext(ctx, log.ChainID, log.BlockNumber, log.BlockHash, log.TxHash, log.LogIndex, log.Address, log.Data, string(topics), removed); err != nil {
 			_ = tx.Rollback()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
 }
 
 func (r *Repository) StoreBlocks(ctx context.Context, blocks []domain.BlockRecord) error {
 	if len(blocks) == 0 {
 		return nil
 	}
+	ctx, span := startDBSpan(ctx, "mysql.StoreBlocks", attribute.Int("block.count", len(blocks)))
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO blocks (chain_id, block_number, block_hash)
@@ -159,6 +182,8 @@ func (r *Repository) StoreBlocks(ctx context.Context, blocks []domain.BlockRecor
 		ON DUPLICATE KEY UPDATE block_hash = VALUES(block_hash)`)
 	if err != nil {
 		_ = tx.Rollback()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 	defer stmt.Close()
@@ -166,11 +191,18 @@ func (r *Repository) StoreBlocks(ctx context.Context, blocks []domain.BlockRecor
 	for _, block := range blocks {
 		if _, err := stmt.ExecContext(ctx, block.ChainID, block.BlockNumber, block.BlockHash); err != nil {
 			_ = tx.Rollback()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
 }
 
 func (r *Repository) GetBlockHash(ctx context.Context, chainID uint64, blockNumber uint64) (string, bool, error) {
@@ -188,16 +220,34 @@ func (r *Repository) GetBlockHash(ctx context.Context, chainID uint64, blockNumb
 }
 
 func (r *Repository) DeleteBlocksFrom(ctx context.Context, chainID uint64, fromBlock uint64) error {
+	ctx, span := startDBSpan(ctx, "mysql.DeleteBlocksFrom",
+		attribute.Int64("chain.id", int64(chainID)),
+		attribute.Int64("from.block", int64(fromBlock)),
+	)
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_, err := r.db.ExecContext(ctx, `DELETE FROM blocks WHERE chain_id = ? AND block_number >= ?`, chainID, fromBlock)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	return err
 }
 
 func (r *Repository) DeleteLogsFrom(ctx context.Context, chainID uint64, fromBlock uint64) error {
+	ctx, span := startDBSpan(ctx, "mysql.DeleteLogsFrom",
+		attribute.Int64("chain.id", int64(chainID)),
+		attribute.Int64("from.block", int64(fromBlock)),
+	)
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_, err := r.db.ExecContext(ctx, `DELETE FROM logs WHERE chain_id = ? AND block_number >= ?`, chainID, fromBlock)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	return err
 }
 
@@ -268,6 +318,12 @@ func (r *Repository) QueryLogs(ctx context.Context, filter application.LogQueryF
 }
 
 func (r *Repository) QueryLogsAfter(ctx context.Context, chainID uint64, afterBlock uint64, afterLogIndex uint64, limit int) ([]domain.LogEntry, error) {
+	ctx, span := startDBSpan(ctx, "mysql.QueryLogsAfter",
+		attribute.Int64("chain.id", int64(chainID)),
+		attribute.Int64("after.block", int64(afterBlock)),
+		attribute.Int64("after.log_index", int64(afterLogIndex)),
+	)
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -283,6 +339,8 @@ func (r *Repository) QueryLogsAfter(ctx context.Context, chainID uint64, afterBl
 
 	rows, err := r.db.QueryContext(ctx, query, chainID, afterBlock, afterBlock, afterLogIndex, limit)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	defer rows.Close()
@@ -293,15 +351,21 @@ func (r *Repository) QueryLogsAfter(ctx context.Context, chainID uint64, afterBl
 		var topicsRaw string
 		var removed int
 		if err := rows.Scan(&log.ChainID, &log.BlockNumber, &log.BlockHash, &log.TxHash, &log.LogIndex, &log.Address, &log.Data, &topicsRaw, &removed); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(topicsRaw), &log.Topics); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, err
 		}
 		log.Removed = removed != 0
 		logs = append(logs, log)
 	}
 	if err := rows.Err(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	return logs, nil
@@ -453,15 +517,32 @@ func (r *Repository) LastProcessedBlock(ctx context.Context, chainID uint64) (ui
 }
 
 func (r *Repository) SetLastProcessedBlock(ctx context.Context, chainID uint64, block uint64) error {
+	ctx, span := startDBSpan(ctx, "mysql.SetLastProcessedBlock",
+		attribute.Int64("chain.id", int64(chainID)),
+		attribute.Int64("block.number", int64(block)),
+	)
+	defer span.End()
 	key := stateKey(chainID)
 	_, err := r.db.ExecContext(ctx, `INSERT INTO state (state_key, state_value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE state_value = VALUES(state_value)`, key, fmt.Sprintf("%d", block))
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	return err
 }
 
 func (r *Repository) ClearLastProcessedBlock(ctx context.Context, chainID uint64) error {
+	ctx, span := startDBSpan(ctx, "mysql.ClearLastProcessedBlock",
+		attribute.Int64("chain.id", int64(chainID)),
+	)
+	defer span.End()
 	key := stateKey(chainID)
 	_, err := r.db.ExecContext(ctx, `DELETE FROM state WHERE state_key = ?`, key)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	return err
 }
 
@@ -482,18 +563,40 @@ func (r *Repository) AddBalanceDelta(ctx context.Context, chainID uint64, addres
 	if delta == nil {
 		return nil
 	}
+	ctx, span := startDBSpan(ctx, "mysql.AddBalanceDelta",
+		attribute.Int64("chain.id", int64(chainID)),
+		attribute.String("address", strings.ToLower(address)),
+	)
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	_, err := r.db.ExecContext(ctx, `INSERT INTO balances (chain_id, address, balance)
 		VALUES (?, ?, ?)
 		ON DUPLICATE KEY UPDATE balance = balance + VALUES(balance)`, chainID, strings.ToLower(address), delta.String())
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	return err
 }
 
 func (r *Repository) ResetBalances(ctx context.Context, chainID uint64) error {
+	ctx, span := startDBSpan(ctx, "mysql.ResetBalances",
+		attribute.Int64("chain.id", int64(chainID)),
+	)
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_, err := r.db.ExecContext(ctx, `DELETE FROM balances WHERE chain_id = ?`, chainID)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	return err
+}
+
+func startDBSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	attrs = append(attrs, attribute.String("db.system", "mysql"))
+	return otel.Tracer("bcindex/mysql").Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
 }

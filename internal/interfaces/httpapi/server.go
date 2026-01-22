@@ -196,6 +196,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			"db_dsn":           s.cfg.DBDSN,
 			"state_db_dsn":     s.cfg.StateDBDSN,
 			"http_addr":        s.cfg.HTTPAddr,
+			"redis_addr":       s.cfg.RedisAddr,
+			"otel_endpoint":    s.cfg.OtelEndpoint,
 			"contract_address": s.cfg.ContractAddress,
 			"topic0":           s.cfg.Topic0,
 			"start_block":      s.cfg.StartBlock,

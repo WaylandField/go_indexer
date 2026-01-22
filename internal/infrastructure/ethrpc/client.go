@@ -13,6 +13,11 @@ import (
 	"sync/atomic"
 
 	"bcindex/internal/domain"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type Client struct {
@@ -157,6 +162,12 @@ type rpcError struct {
 }
 
 func (c *Client) call(ctx context.Context, method string, params []any, result any) error {
+	tracer := otel.Tracer("bcindex/ethrpc")
+	ctx, span := tracer.Start(ctx, "rpc."+method, trace.WithSpanKind(trace.SpanKindClient))
+	span.SetAttributes(
+		attribute.String("rpc.method", method),
+		attribute.String("rpc.url", c.url),
+	)
 	id := atomic.AddUint64(&c.idCounter, 1)
 	payload, err := json.Marshal(rpcRequest{
 		JSONRPC: "2.0",
@@ -165,39 +176,71 @@ func (c *Client) call(ctx context.Context, method string, params []any, result a
 		Params:  params,
 	})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
 		return err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("rpc status %d", resp.StatusCode)
+		err := fmt.Errorf("rpc status %d", resp.StatusCode)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
+		return err
 	}
 
 	var decoded rpcResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
 		return err
 	}
 	if decoded.Error != nil {
-		return fmt.Errorf("rpc error %d: %s (method=%s)", decoded.Error.Code, decoded.Error.Message, method)
+		err := fmt.Errorf("rpc error %d: %s (method=%s)", decoded.Error.Code, decoded.Error.Message, method)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
+		return err
 	}
 	if result == nil {
+		span.End()
 		return nil
 	}
 	if len(decoded.Result) == 0 {
-		return errors.New("rpc result is empty")
+		err := errors.New("rpc result is empty")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
+		return err
 	}
-	return json.Unmarshal(decoded.Result, result)
+	if err := json.Unmarshal(decoded.Result, result); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
+		return err
+	}
+	span.End()
+	return nil
 }
 
 func (c *Client) fetchChainID(ctx context.Context) (uint64, error) {

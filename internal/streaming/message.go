@@ -16,6 +16,7 @@ const (
 type Message struct {
 	Type        MessageType `json:"type"`
 	ChainID     uint64      `json:"chain_id"`
+	TraceID     string      `json:"trace_id,omitempty"`
 	BlockNumber uint64      `json:"block_number,omitempty"`
 	BlockHash   string      `json:"block_hash,omitempty"`
 	TxHash      string      `json:"tx_hash,omitempty"`

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"bcindex/internal/domain"
@@ -41,10 +42,12 @@ type IndexerObserver interface {
 }
 
 type IndexerConfig struct {
-	StartBlock    uint64
-	Confirmations uint64
-	PollInterval  time.Duration
-	BatchSize     uint64
+	StartBlock        uint64
+	Confirmations     uint64
+	PollInterval      time.Duration
+	BatchSize         uint64
+	LogFetchChunkSize uint64
+	LogFetchWorkers   int
 }
 
 type Indexer struct {
@@ -58,12 +61,27 @@ type Indexer struct {
 
 var ErrBlockUnavailable = errors.New("block unavailable")
 
+const fastEmptyFetchThreshold = 200 * time.Millisecond
+
 func NewIndexer(source LogSource, writer StreamWriter, blocks BlockRepository, state StateRepository, observer IndexerObserver, cfg IndexerConfig) (*Indexer, error) {
 	if source == nil || writer == nil || blocks == nil || state == nil {
 		return nil, errors.New("indexer dependencies must not be nil")
 	}
 	if cfg.BatchSize == 0 {
 		cfg.BatchSize = 1000
+	}
+	if cfg.LogFetchChunkSize == 0 {
+		if cfg.BatchSize < 100 {
+			cfg.LogFetchChunkSize = cfg.BatchSize
+		} else {
+			cfg.LogFetchChunkSize = 100
+		}
+	}
+	if cfg.LogFetchChunkSize > cfg.BatchSize {
+		cfg.LogFetchChunkSize = cfg.BatchSize
+	}
+	if cfg.LogFetchWorkers <= 0 {
+		cfg.LogFetchWorkers = 5
 	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 5 * time.Second
@@ -78,6 +96,8 @@ func (i *Indexer) Run(ctx context.Context) error {
 	}
 
 	current := i.cfg.StartBlock
+	batchSize := i.cfg.BatchSize
+	maxBatchSize := i.cfg.BatchSize
 	for {
 		select {
 		case <-ctx.Done():
@@ -126,14 +146,32 @@ func (i *Indexer) Run(ctx context.Context) error {
 			}
 		}
 
-		toBlock := current + i.cfg.BatchSize - 1
+		toBlock := current + batchSize - 1
 		if toBlock > latest {
 			toBlock = latest
 		}
 
-		logs, err := i.source.FetchLogs(ctx, current, toBlock)
+		fetchStart := time.Now()
+		logs, err := i.fetchLogs(ctx, current, toBlock)
 		if err != nil {
+			if isResponseTooLarge(err) {
+				if batchSize <= 1 {
+					return err
+				}
+				batchSize /= 2
+				if batchSize == 0 {
+					batchSize = 1
+				}
+				continue
+			}
 			return err
+		}
+		if len(logs) == 0 && time.Since(fetchStart) < fastEmptyFetchThreshold && batchSize < maxBatchSize {
+			next := batchSize * 2
+			if next > maxBatchSize {
+				next = maxBatchSize
+			}
+			batchSize = next
 		}
 		sort.Slice(logs, func(a, b int) bool {
 			if logs[a].BlockNumber == logs[b].BlockNumber {
@@ -171,6 +209,125 @@ func (i *Indexer) Run(ctx context.Context) error {
 
 		current = toBlock + 1
 	}
+}
+
+func isResponseTooLarge(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "response body too large") ||
+		strings.Contains(lower, "response too large") ||
+		strings.Contains(lower, "body too large") ||
+		strings.Contains(lower, "request entity too large") ||
+		strings.Contains(lower, "exceeds the limit")
+}
+
+func (i *Indexer) fetchLogs(ctx context.Context, fromBlock, toBlock uint64) ([]domain.LogEntry, error) {
+	if fromBlock > toBlock {
+		return nil, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	totalBlocks := toBlock - fromBlock + 1
+	if i.cfg.LogFetchWorkers <= 1 || i.cfg.LogFetchChunkSize >= totalBlocks {
+		return i.source.FetchLogs(ctx, fromBlock, toBlock)
+	}
+
+	type logRange struct {
+		from  uint64
+		to    uint64
+		index int
+	}
+	type logResult struct {
+		index int
+		logs  []domain.LogEntry
+		err   error
+	}
+
+	ranges := make([]logRange, 0, int((totalBlocks+i.cfg.LogFetchChunkSize-1)/i.cfg.LogFetchChunkSize))
+	start := fromBlock
+	for start <= toBlock {
+		end := start + i.cfg.LogFetchChunkSize - 1
+		if end > toBlock {
+			end = toBlock
+		}
+		ranges = append(ranges, logRange{from: start, to: end, index: len(ranges)})
+		if end == toBlock {
+			break
+		}
+		start = end + 1
+	}
+
+	workerCount := i.cfg.LogFetchWorkers
+	if workerCount > len(ranges) {
+		workerCount = len(ranges)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan logRange)
+	results := make(chan logResult, len(ranges))
+
+	var wg sync.WaitGroup
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				logs, err := i.source.FetchLogs(ctx, job.from, job.to)
+				if err != nil {
+					cancel()
+				}
+				results <- logResult{index: job.index, logs: logs, err: err}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	jobsSent := 0
+	for _, job := range ranges {
+		if ctx.Err() != nil {
+			break
+		}
+		jobs <- job
+		jobsSent++
+	}
+	close(jobs)
+
+	parts := make([][]domain.LogEntry, len(ranges))
+	var firstErr error
+	for i := 0; i < jobsSent; i++ {
+		result := <-results
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+		}
+		if result.err == nil {
+			parts[result.index] = result.logs
+		}
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	totalLogs := 0
+	for _, logs := range parts {
+		totalLogs += len(logs)
+	}
+	merged := make([]domain.LogEntry, 0, totalLogs)
+	for _, logs := range parts {
+		merged = append(merged, logs...)
+	}
+	return merged, nil
 }
 
 func (i *Indexer) fetchBlocks(ctx context.Context, chainID, fromBlock, toBlock uint64) ([]domain.BlockRecord, error) {

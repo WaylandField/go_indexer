@@ -10,20 +10,24 @@ import (
 )
 
 type Config struct {
-	RPCURL           string
-	DBDSN            string
-	StateDBDSN       string
-	HTTPAddr         string
-	ContractAddress  string
-	Topic0           string
-	StartBlock       uint64
-	Confirmations    uint64
-	BatchSize        uint64
-	PollInterval     time.Duration
-	KafkaBrokers     []string
-	KafkaTopicPrefix string
-	KafkaGroupID     string
-	ChainIDs         []uint64
+	RPCURL            string
+	DBDSN             string
+	StateDBDSN        string
+	HTTPAddr          string
+	RedisAddr         string
+	OtelEndpoint      string
+	ContractAddress   string
+	Topic0            string
+	StartBlock        uint64
+	Confirmations     uint64
+	BatchSize         uint64
+	LogFetchChunkSize uint64
+	LogFetchWorkers   int
+	PollInterval      time.Duration
+	KafkaBrokers      []string
+	KafkaTopicPrefix  string
+	KafkaGroupID      string
+	ChainIDs          []uint64
 }
 
 type EnvSource interface {
@@ -74,6 +78,15 @@ func Load(source EnvSource) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	logFetchChunkSize, err := parseUintEnv(source, "LOG_FETCH_CHUNK_SIZE", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	logFetchWorkersRaw, err := parseUintEnv(source, "LOG_FETCH_WORKERS", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	logFetchWorkers := int(logFetchWorkersRaw)
 
 	pollInterval := 5 * time.Second
 	if raw, ok := source.Lookup("POLL_INTERVAL"); ok && raw != "" {
@@ -99,6 +112,14 @@ func Load(source EnvSource) (Config, error) {
 		httpAddr = raw
 	}
 
+	redisAddr := "127.0.0.1:6379"
+	if raw, ok := source.Lookup("REDIS_ADDR"); ok {
+		redisAddr = strings.TrimSpace(raw)
+	}
+
+	otelEndpoint, _ := source.Lookup("OTEL_EXPORTER_OTLP_ENDPOINT")
+	otelEndpoint = strings.TrimSpace(otelEndpoint)
+
 	contractAddress, _ := source.Lookup("CONTRACT_ADDRESS")
 	topic0, _ := source.Lookup("TOPIC0")
 
@@ -120,20 +141,24 @@ func Load(source EnvSource) (Config, error) {
 	}
 
 	return Config{
-		RPCURL:           rpcURL,
-		DBDSN:            dbDSN,
-		StateDBDSN:       stateDBDSN,
-		HTTPAddr:         httpAddr,
-		ContractAddress:  contractAddress,
-		Topic0:           topic0,
-		StartBlock:       startBlock,
-		Confirmations:    confirmations,
-		BatchSize:        batchSize,
-		PollInterval:     pollInterval,
-		KafkaBrokers:     kafkaBrokers,
-		KafkaTopicPrefix: kafkaTopicPrefix,
-		KafkaGroupID:     kafkaGroupID,
-		ChainIDs:         chainIDs,
+		RPCURL:            rpcURL,
+		DBDSN:             dbDSN,
+		StateDBDSN:        stateDBDSN,
+		HTTPAddr:          httpAddr,
+		RedisAddr:         redisAddr,
+		OtelEndpoint:      otelEndpoint,
+		ContractAddress:   contractAddress,
+		Topic0:            topic0,
+		StartBlock:        startBlock,
+		Confirmations:     confirmations,
+		BatchSize:         batchSize,
+		LogFetchChunkSize: logFetchChunkSize,
+		LogFetchWorkers:   logFetchWorkers,
+		PollInterval:      pollInterval,
+		KafkaBrokers:      kafkaBrokers,
+		KafkaTopicPrefix:  kafkaTopicPrefix,
+		KafkaGroupID:      kafkaGroupID,
+		ChainIDs:          chainIDs,
 	}, nil
 }
 
