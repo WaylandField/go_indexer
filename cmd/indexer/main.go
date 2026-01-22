@@ -13,8 +13,10 @@ import (
 
 	"bcindex/internal/application"
 	"bcindex/internal/config"
+	"bcindex/internal/infrastructure/clickhouse"
 	"bcindex/internal/infrastructure/ethrpc"
 	"bcindex/internal/infrastructure/mysql"
+	"bcindex/internal/infrastructure/storage"
 	"bcindex/internal/infrastructure/telemetry"
 	"bcindex/internal/interfaces/httpapi"
 	"bcindex/internal/streaming"
@@ -38,23 +40,25 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	baseRepo, err := mysql.NewRepository(cfg.DBDSN)
+	mysqlRepo, err := mysql.NewRepository(cfg.DBDSN)
 	if err != nil {
 		log.Fatalf("db error: %v", err)
 	}
-	var (
-		repo  application.ComputeBalanceRepository = baseRepo
-		store httpapi.LogStore                     = baseRepo
-	)
-	if cachedRepo, err := mysql.NewCachedRepository(baseRepo, mysql.CacheConfig{
-		Addr: cfg.RedisAddr,
-		TTL:  time.Hour,
-	}); err != nil {
-		log.Printf("redis cache disabled: %v", err)
-	} else if cachedRepo != nil {
-		repo = cachedRepo
-		store = cachedRepo
+
+	logRepo, err := clickhouse.NewRepository(cfg.ClickhouseDSN)
+	if err != nil {
+		log.Fatalf("clickhouse error: %v", err)
 	}
+
+	combinedRepo, err := storage.NewRepository(mysqlRepo, logRepo)
+	if err != nil {
+		log.Fatalf("storage error: %v", err)
+	}
+
+	var (
+		repo  application.ComputeBalanceRepository = combinedRepo
+		store httpapi.LogStore                     = combinedRepo
+	)
 
 	shutdownTracing, err := telemetry.InitTracer(context.Background(), "bcindex-compute", cfg.OtelEndpoint)
 	if err != nil {
@@ -222,6 +226,12 @@ func consumeStream(ctx context.Context, reader *kafka.Reader, repo application.C
 		case streaming.MessageTypeBlock:
 			blockCount++
 			lastBlock = decoded.BlockNumber
+		case streaming.MessageTypeTransaction:
+			lastBlock = decoded.BlockNumber
+			lastTx = decoded.TxHash
+		case streaming.MessageTypeReceipt:
+			lastBlock = decoded.BlockNumber
+			lastTx = decoded.TxHash
 		case streaming.MessageTypeReorg:
 			reorgCount++
 			lastBlock = decoded.FromBlock

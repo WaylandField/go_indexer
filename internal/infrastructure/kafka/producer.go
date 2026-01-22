@@ -142,11 +142,16 @@ func (p *Producer) PublishBlocks(ctx context.Context, blocks []domain.BlockRecor
 		)
 
 		payload, err := streaming.Encode(streaming.Message{
-			Type:        streaming.MessageTypeBlock,
-			ChainID:     block.ChainID,
-			TraceID:     traceIDHex,
-			BlockNumber: block.BlockNumber,
-			BlockHash:   block.BlockHash,
+			Type:          streaming.MessageTypeBlock,
+			ChainID:       block.ChainID,
+			TraceID:       traceIDHex,
+			BlockNumber:   block.BlockNumber,
+			BlockHash:     block.BlockHash,
+			ParentHash:    block.ParentHash,
+			Timestamp:     block.Timestamp,
+			BlockGasLimit: block.GasLimit,
+			BlockGasUsed:  block.GasUsed,
+			TxCount:       block.TxCount,
 		})
 		if err != nil {
 			span.RecordError(err)
@@ -159,6 +164,146 @@ func (p *Producer) PublishBlocks(ctx context.Context, blocks []domain.BlockRecor
 		messages = append(messages, kafka.Message{
 			Topic:   p.topicForChain(block.ChainID),
 			Key:     []byte(fmt.Sprintf("block:%d", block.BlockNumber)),
+			Value:   payload,
+			Headers: headers,
+		})
+		spans = append(spans, span)
+	}
+	err := p.writer.WriteMessages(ctx, messages...)
+	if err != nil {
+		for _, span := range spans {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+	}
+	for _, span := range spans {
+		span.End()
+	}
+	return err
+}
+
+func (p *Producer) PublishTransactions(ctx context.Context, transactions []domain.Transaction) error {
+	if len(transactions) == 0 {
+		return nil
+	}
+	tracer := otel.Tracer("bcindex/kafka")
+	messages := make([]kafka.Message, 0, len(transactions))
+	spans := make([]trace.Span, 0, len(transactions))
+	for _, tx := range transactions {
+		traceID, traceIDHex, ok := telemetry.NewTraceID()
+		if !ok {
+			traceIDHex = ""
+		}
+		traceCtx := ctx
+		if ok {
+			if spanCtx, ok := telemetry.NewSpanContext(traceID); ok {
+				traceCtx = trace.ContextWithSpanContext(ctx, spanCtx)
+			}
+		}
+		traceCtx, span := tracer.Start(traceCtx, "ordering.publish_tx", trace.WithSpanKind(trace.SpanKindProducer))
+		span.SetAttributes(
+			attribute.Int64("chain.id", int64(tx.ChainID)),
+			attribute.String("tx.hash", tx.TxHash),
+			attribute.Int64("block.number", int64(tx.BlockNumber)),
+		)
+
+		payload, err := streaming.Encode(streaming.Message{
+			Type:        streaming.MessageTypeTransaction,
+			ChainID:     tx.ChainID,
+			TraceID:     traceIDHex,
+			BlockNumber: tx.BlockNumber,
+			BlockHash:   tx.BlockHash,
+			TxHash:      tx.TxHash,
+			TxIndex:     tx.TxIndex,
+			From:        tx.From,
+			To:          tx.To,
+			Value:       tx.Value,
+			Nonce:       tx.Nonce,
+			Gas:         tx.Gas,
+			GasPrice:    tx.GasPrice,
+			Input:       tx.Input,
+			TxType:      tx.TxType,
+		})
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.End()
+			return err
+		}
+		headers := make([]kafka.Header, 0, 2)
+		telemetry.InjectKafkaHeaders(traceCtx, &headers)
+		messages = append(messages, kafka.Message{
+			Topic:   p.topicForChain(tx.ChainID),
+			Key:     []byte(tx.TxHash),
+			Value:   payload,
+			Headers: headers,
+		})
+		spans = append(spans, span)
+	}
+	err := p.writer.WriteMessages(ctx, messages...)
+	if err != nil {
+		for _, span := range spans {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+	}
+	for _, span := range spans {
+		span.End()
+	}
+	return err
+}
+
+func (p *Producer) PublishReceipts(ctx context.Context, receipts []domain.Receipt) error {
+	if len(receipts) == 0 {
+		return nil
+	}
+	tracer := otel.Tracer("bcindex/kafka")
+	messages := make([]kafka.Message, 0, len(receipts))
+	spans := make([]trace.Span, 0, len(receipts))
+	for _, receipt := range receipts {
+		traceID, traceIDHex, ok := telemetry.NewTraceID()
+		if !ok {
+			traceIDHex = ""
+		}
+		traceCtx := ctx
+		if ok {
+			if spanCtx, ok := telemetry.NewSpanContext(traceID); ok {
+				traceCtx = trace.ContextWithSpanContext(ctx, spanCtx)
+			}
+		}
+		traceCtx, span := tracer.Start(traceCtx, "ordering.publish_receipt", trace.WithSpanKind(trace.SpanKindProducer))
+		span.SetAttributes(
+			attribute.Int64("chain.id", int64(receipt.ChainID)),
+			attribute.String("tx.hash", receipt.TxHash),
+			attribute.Int64("block.number", int64(receipt.BlockNumber)),
+		)
+
+		payload, err := streaming.Encode(streaming.Message{
+			Type:              streaming.MessageTypeReceipt,
+			ChainID:           receipt.ChainID,
+			TraceID:           traceIDHex,
+			BlockNumber:       receipt.BlockNumber,
+			BlockHash:         receipt.BlockHash,
+			TxHash:            receipt.TxHash,
+			TxIndex:           receipt.TxIndex,
+			Status:            receipt.Status,
+			CumulativeGasUsed: receipt.CumulativeGasUsed,
+			ReceiptGasUsed:    receipt.GasUsed,
+			ContractAddress:   receipt.ContractAddress,
+			LogsBloom:         receipt.LogsBloom,
+			EffectiveGasPrice: receipt.EffectiveGasPrice,
+		})
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.End()
+			return err
+		}
+		headers := make([]kafka.Header, 0, 2)
+		telemetry.InjectKafkaHeaders(traceCtx, &headers)
+		messages = append(messages, kafka.Message{
+			Topic:   p.topicForChain(receipt.ChainID),
+			Key:     []byte(receipt.TxHash),
 			Value:   payload,
 			Headers: headers,
 		})

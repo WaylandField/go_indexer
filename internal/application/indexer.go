@@ -16,6 +16,8 @@ type LogSource interface {
 	FetchLogs(ctx context.Context, fromBlock, toBlock uint64) ([]domain.LogEntry, error)
 	ChainID(ctx context.Context) (uint64, error)
 	BlockHash(ctx context.Context, blockNumber uint64) (string, bool, error)
+	BlockWithTransactions(ctx context.Context, blockNumber uint64) (domain.BlockRecord, []domain.Transaction, bool, error)
+	TransactionReceipt(ctx context.Context, txHash string) (domain.Receipt, bool, error)
 }
 
 type BlockRepository interface {
@@ -33,6 +35,8 @@ type StateRepository interface {
 type StreamWriter interface {
 	PublishLogs(ctx context.Context, logs []domain.LogEntry) error
 	PublishBlocks(ctx context.Context, blocks []domain.BlockRecord) error
+	PublishTransactions(ctx context.Context, transactions []domain.Transaction) error
+	PublishReceipts(ctx context.Context, receipts []domain.Receipt) error
 	PublishReorg(ctx context.Context, chainID uint64, fromBlock uint64, reason string) error
 }
 
@@ -179,7 +183,7 @@ func (i *Indexer) Run(ctx context.Context) error {
 			}
 			return logs[a].BlockNumber < logs[b].BlockNumber
 		})
-		blocks, err := i.fetchBlocks(ctx, chainID, current, toBlock)
+		blocks, transactions, receipts, err := i.fetchBlockData(ctx, chainID, current, toBlock)
 		if err != nil {
 			if errors.Is(err, ErrBlockUnavailable) {
 				select {
@@ -192,6 +196,12 @@ func (i *Indexer) Run(ctx context.Context) error {
 			return err
 		}
 		if err := i.writer.PublishBlocks(ctx, blocks); err != nil {
+			return err
+		}
+		if err := i.writer.PublishTransactions(ctx, transactions); err != nil {
+			return err
+		}
+		if err := i.writer.PublishReceipts(ctx, receipts); err != nil {
 			return err
 		}
 		if err := i.writer.PublishLogs(ctx, logs); err != nil {
@@ -330,26 +340,36 @@ func (i *Indexer) fetchLogs(ctx context.Context, fromBlock, toBlock uint64) ([]d
 	return merged, nil
 }
 
-func (i *Indexer) fetchBlocks(ctx context.Context, chainID, fromBlock, toBlock uint64) ([]domain.BlockRecord, error) {
+func (i *Indexer) fetchBlockData(ctx context.Context, chainID, fromBlock, toBlock uint64) ([]domain.BlockRecord, []domain.Transaction, []domain.Receipt, error) {
 	if fromBlock > toBlock {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 	blocks := make([]domain.BlockRecord, 0, int(toBlock-fromBlock)+1)
+	transactions := make([]domain.Transaction, 0, (int(toBlock-fromBlock)+1)*2)
+	receipts := make([]domain.Receipt, 0, (int(toBlock-fromBlock)+1)*2)
 	for block := fromBlock; block <= toBlock; block++ {
-		hash, ok, err := i.source.BlockHash(ctx, block)
+		record, txs, ok, err := i.source.BlockWithTransactions(ctx, block)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 		if !ok {
-			return nil, ErrBlockUnavailable
+			return nil, nil, nil, ErrBlockUnavailable
 		}
-		blocks = append(blocks, domain.BlockRecord{
-			ChainID:     chainID,
-			BlockNumber: block,
-			BlockHash:   hash,
-		})
+		record.ChainID = chainID
+		blocks = append(blocks, record)
+		for _, tx := range txs {
+			transactions = append(transactions, tx)
+			receipt, ok, err := i.source.TransactionReceipt(ctx, tx.TxHash)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if !ok {
+				return nil, nil, nil, ErrBlockUnavailable
+			}
+			receipts = append(receipts, receipt)
+		}
 	}
-	return blocks, nil
+	return blocks, transactions, receipts, nil
 }
 
 func (i *Indexer) reconcileReorg(ctx context.Context, chainID uint64) error {

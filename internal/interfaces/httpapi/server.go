@@ -18,7 +18,7 @@ import (
 
 type LogStore interface {
 	QueryLogs(ctx context.Context, filter application.LogQueryFilter) ([]domain.LogEntry, error)
-	QueryTransactions(ctx context.Context, filter application.TransactionQueryFilter) ([]domain.TransactionSummary, error)
+	QueryTransactions(ctx context.Context, filter application.TransactionQueryFilter) ([]domain.Transaction, error)
 	QueryBalances(ctx context.Context, filter application.BalanceQueryFilter) ([]domain.Balance, error)
 	LastProcessedBlock(ctx context.Context, chainID uint64) (uint64, bool, error)
 	SetLastProcessedBlock(ctx context.Context, chainID uint64, block uint64) error
@@ -195,6 +195,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			"rpc_url":          s.cfg.RPCURL,
 			"db_dsn":           s.cfg.DBDSN,
 			"state_db_dsn":     s.cfg.StateDBDSN,
+			"clickhouse_dsn":   s.cfg.ClickhouseDSN,
 			"http_addr":        s.cfg.HTTPAddr,
 			"redis_addr":       s.cfg.RedisAddr,
 			"otel_endpoint":    s.cfg.OtelEndpoint,

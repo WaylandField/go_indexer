@@ -63,7 +63,46 @@ func createSchema(db *sql.DB) error {
 			chain_id BIGINT UNSIGNED NOT NULL,
 			block_number BIGINT UNSIGNED NOT NULL,
 			block_hash VARCHAR(66) NOT NULL,
+			parent_hash VARCHAR(66) NOT NULL DEFAULT '',
+			timestamp BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			gas_limit BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			gas_used BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			tx_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
 			PRIMARY KEY (chain_id, block_number)
+		)`,
+		`CREATE TABLE IF NOT EXISTS transactions (
+			chain_id BIGINT UNSIGNED NOT NULL,
+			tx_hash VARCHAR(66) NOT NULL,
+			block_number BIGINT UNSIGNED NOT NULL,
+			block_hash VARCHAR(66) NOT NULL,
+			tx_index BIGINT UNSIGNED NOT NULL,
+			from_addr VARCHAR(42) NOT NULL,
+			to_addr VARCHAR(42) NULL,
+			value DECIMAL(65,0) NOT NULL,
+			nonce BIGINT UNSIGNED NOT NULL,
+			gas BIGINT UNSIGNED NOT NULL,
+			gas_price DECIMAL(65,0) NOT NULL,
+			input MEDIUMTEXT NOT NULL,
+			tx_type BIGINT UNSIGNED NOT NULL,
+			PRIMARY KEY (chain_id, tx_hash),
+			KEY tx_block_idx (chain_id, block_number),
+			KEY tx_from_idx (chain_id, from_addr),
+			KEY tx_to_idx (chain_id, to_addr)
+		)`,
+		`CREATE TABLE IF NOT EXISTS receipts (
+			chain_id BIGINT UNSIGNED NOT NULL,
+			tx_hash VARCHAR(66) NOT NULL,
+			block_number BIGINT UNSIGNED NOT NULL,
+			block_hash VARCHAR(66) NOT NULL,
+			tx_index BIGINT UNSIGNED NOT NULL,
+			status TINYINT UNSIGNED NOT NULL,
+			cumulative_gas_used BIGINT UNSIGNED NOT NULL,
+			gas_used BIGINT UNSIGNED NOT NULL,
+			contract_address VARCHAR(42) NULL,
+			logs_bloom VARCHAR(514) NOT NULL,
+			effective_gas_price DECIMAL(65,0) NOT NULL,
+			PRIMARY KEY (chain_id, tx_hash),
+			KEY receipts_block_idx (chain_id, block_number)
 		)`,
 		`CREATE TABLE IF NOT EXISTS balances (
 			chain_id BIGINT UNSIGNED NOT NULL,
@@ -86,6 +125,21 @@ func createSchema(db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumn(db, "logs", "block_hash", "VARCHAR(66) NOT NULL"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "blocks", "parent_hash", "VARCHAR(66) NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "blocks", "timestamp", "BIGINT UNSIGNED NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "blocks", "gas_limit", "BIGINT UNSIGNED NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "blocks", "gas_used", "BIGINT UNSIGNED NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "blocks", "tx_count", "BIGINT UNSIGNED NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
@@ -177,9 +231,15 @@ func (r *Repository) StoreBlocks(ctx context.Context, blocks []domain.BlockRecor
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO blocks (chain_id, block_number, block_hash)
-		VALUES (?, ?, ?)
-		ON DUPLICATE KEY UPDATE block_hash = VALUES(block_hash)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO blocks (chain_id, block_number, block_hash, parent_hash, timestamp, gas_limit, gas_used, tx_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			block_hash = VALUES(block_hash),
+			parent_hash = VALUES(parent_hash),
+			timestamp = VALUES(timestamp),
+			gas_limit = VALUES(gas_limit),
+			gas_used = VALUES(gas_used),
+			tx_count = VALUES(tx_count)`)
 	if err != nil {
 		_ = tx.Rollback()
 		span.RecordError(err)
@@ -189,7 +249,7 @@ func (r *Repository) StoreBlocks(ctx context.Context, blocks []domain.BlockRecor
 	defer stmt.Close()
 
 	for _, block := range blocks {
-		if _, err := stmt.ExecContext(ctx, block.ChainID, block.BlockNumber, block.BlockHash); err != nil {
+		if _, err := stmt.ExecContext(ctx, block.ChainID, block.BlockNumber, block.BlockHash, block.ParentHash, block.Timestamp, block.GasLimit, block.GasUsed, block.TxCount); err != nil {
 			_ = tx.Rollback()
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -244,6 +304,168 @@ func (r *Repository) DeleteLogsFrom(ctx context.Context, chainID uint64, fromBlo
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_, err := r.db.ExecContext(ctx, `DELETE FROM logs WHERE chain_id = ? AND block_number >= ?`, chainID, fromBlock)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
+}
+
+func (r *Repository) StoreTransactions(ctx context.Context, transactions []domain.Transaction) error {
+	if len(transactions) == 0 {
+		return nil
+	}
+	ctx, span := startDBSpan(ctx, "mysql.StoreTransactions", attribute.Int("tx.count", len(transactions)))
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO transactions (chain_id, tx_hash, block_number, block_hash, tx_index, from_addr, to_addr, value, nonce, gas, gas_price, input, tx_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			block_number = VALUES(block_number),
+			block_hash = VALUES(block_hash),
+			tx_index = VALUES(tx_index),
+			from_addr = VALUES(from_addr),
+			to_addr = VALUES(to_addr),
+			value = VALUES(value),
+			nonce = VALUES(nonce),
+			gas = VALUES(gas),
+			gas_price = VALUES(gas_price),
+			input = VALUES(input),
+			tx_type = VALUES(tx_type)`)
+	if err != nil {
+		_ = tx.Rollback()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	defer stmt.Close()
+
+	for _, entry := range transactions {
+		var toAddr any
+		if entry.To != "" {
+			toAddr = strings.ToLower(entry.To)
+		}
+		value := entry.Value
+		if value == "" {
+			value = "0"
+		}
+		gasPrice := entry.GasPrice
+		if gasPrice == "" {
+			gasPrice = "0"
+		}
+		txHash := strings.ToLower(entry.TxHash)
+		blockHash := strings.ToLower(entry.BlockHash)
+		if _, err := stmt.ExecContext(ctx, entry.ChainID, txHash, entry.BlockNumber, blockHash, entry.TxIndex, strings.ToLower(entry.From), toAddr, value, entry.Nonce, entry.Gas, gasPrice, entry.Input, entry.TxType); err != nil {
+			_ = tx.Rollback()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
+}
+
+func (r *Repository) StoreReceipts(ctx context.Context, receipts []domain.Receipt) error {
+	if len(receipts) == 0 {
+		return nil
+	}
+	ctx, span := startDBSpan(ctx, "mysql.StoreReceipts", attribute.Int("receipt.count", len(receipts)))
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO receipts (chain_id, tx_hash, block_number, block_hash, tx_index, status, cumulative_gas_used, gas_used, contract_address, logs_bloom, effective_gas_price)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			block_number = VALUES(block_number),
+			block_hash = VALUES(block_hash),
+			tx_index = VALUES(tx_index),
+			status = VALUES(status),
+			cumulative_gas_used = VALUES(cumulative_gas_used),
+			gas_used = VALUES(gas_used),
+			contract_address = VALUES(contract_address),
+			logs_bloom = VALUES(logs_bloom),
+			effective_gas_price = VALUES(effective_gas_price)`)
+	if err != nil {
+		_ = tx.Rollback()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	defer stmt.Close()
+
+	for _, receipt := range receipts {
+		var contract any
+		if receipt.ContractAddress != "" {
+			contract = strings.ToLower(receipt.ContractAddress)
+		}
+		effectiveGasPrice := receipt.EffectiveGasPrice
+		if effectiveGasPrice == "" {
+			effectiveGasPrice = "0"
+		}
+		txHash := strings.ToLower(receipt.TxHash)
+		blockHash := strings.ToLower(receipt.BlockHash)
+		if _, err := stmt.ExecContext(ctx, receipt.ChainID, txHash, receipt.BlockNumber, blockHash, receipt.TxIndex, receipt.Status, receipt.CumulativeGasUsed, receipt.GasUsed, contract, receipt.LogsBloom, effectiveGasPrice); err != nil {
+			_ = tx.Rollback()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
+}
+
+func (r *Repository) DeleteTransactionsFrom(ctx context.Context, chainID uint64, fromBlock uint64) error {
+	ctx, span := startDBSpan(ctx, "mysql.DeleteTransactionsFrom",
+		attribute.Int64("chain.id", int64(chainID)),
+		attribute.Int64("from.block", int64(fromBlock)),
+	)
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := r.db.ExecContext(ctx, `DELETE FROM transactions WHERE chain_id = ? AND block_number >= ?`, chainID, fromBlock)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
+}
+
+func (r *Repository) DeleteReceiptsFrom(ctx context.Context, chainID uint64, fromBlock uint64) error {
+	ctx, span := startDBSpan(ctx, "mysql.DeleteReceiptsFrom",
+		attribute.Int64("chain.id", int64(chainID)),
+		attribute.Int64("from.block", int64(fromBlock)),
+	)
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := r.db.ExecContext(ctx, `DELETE FROM receipts WHERE chain_id = ? AND block_number >= ?`, chainID, fromBlock)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -371,7 +593,7 @@ func (r *Repository) QueryLogsAfter(ctx context.Context, chainID uint64, afterBl
 	return logs, nil
 }
 
-func (r *Repository) QueryTransactions(ctx context.Context, filter application.TransactionQueryFilter) ([]domain.TransactionSummary, error) {
+func (r *Repository) QueryTransactions(ctx context.Context, filter application.TransactionQueryFilter) ([]domain.Transaction, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -379,8 +601,9 @@ func (r *Repository) QueryTransactions(ctx context.Context, filter application.T
 	args := make([]any, 0, 6)
 
 	if filter.Address != "" {
-		clauses = append(clauses, "address = ?")
-		args = append(args, strings.ToLower(filter.Address))
+		clauses = append(clauses, "(from_addr = ? OR to_addr = ?)")
+		address := strings.ToLower(filter.Address)
+		args = append(args, address, address)
 	}
 	if filter.ChainID != nil {
 		clauses = append(clauses, "chain_id = ?")
@@ -388,7 +611,7 @@ func (r *Repository) QueryTransactions(ctx context.Context, filter application.T
 	}
 	if filter.TxHash != "" {
 		clauses = append(clauses, "tx_hash = ?")
-		args = append(args, filter.TxHash)
+		args = append(args, strings.ToLower(filter.TxHash))
 	}
 	if filter.FromBlock != nil {
 		clauses = append(clauses, "block_number >= ?")
@@ -399,11 +622,11 @@ func (r *Repository) QueryTransactions(ctx context.Context, filter application.T
 		args = append(args, *filter.ToBlock)
 	}
 
-	query := `SELECT chain_id, tx_hash, MIN(block_number) as block_number, COUNT(*) as log_count FROM logs`
+	query := `SELECT chain_id, tx_hash, block_number, block_hash, tx_index, from_addr, to_addr, value, nonce, gas, gas_price, input, tx_type FROM transactions`
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
-	query += " GROUP BY chain_id, tx_hash ORDER BY block_number ASC LIMIT ?"
+	query += " ORDER BY block_number ASC, tx_index ASC LIMIT ?"
 
 	limit := filter.Limit
 	if limit <= 0 || limit > 1000 {
@@ -417,11 +640,15 @@ func (r *Repository) QueryTransactions(ctx context.Context, filter application.T
 	}
 	defer rows.Close()
 
-	var transactions []domain.TransactionSummary
+	var transactions []domain.Transaction
 	for rows.Next() {
-		var tx domain.TransactionSummary
-		if err := rows.Scan(&tx.ChainID, &tx.TxHash, &tx.BlockNumber, &tx.LogCount); err != nil {
+		var tx domain.Transaction
+		var toAddr sql.NullString
+		if err := rows.Scan(&tx.ChainID, &tx.TxHash, &tx.BlockNumber, &tx.BlockHash, &tx.TxIndex, &tx.From, &toAddr, &tx.Value, &tx.Nonce, &tx.Gas, &tx.GasPrice, &tx.Input, &tx.TxType); err != nil {
 			return nil, err
+		}
+		if toAddr.Valid {
+			tx.To = toAddr.String
 		}
 		transactions = append(transactions, tx)
 	}

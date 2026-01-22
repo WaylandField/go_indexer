@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -83,6 +84,143 @@ func (c *Client) BlockHash(ctx context.Context, blockNumber uint64) (string, boo
 	return strings.ToLower(result.Hash), true, nil
 }
 
+func (c *Client) BlockWithTransactions(ctx context.Context, blockNumber uint64) (domain.BlockRecord, []domain.Transaction, bool, error) {
+	chainID, err := c.fetchChainID(ctx)
+	if err != nil {
+		return domain.BlockRecord{}, nil, false, err
+	}
+
+	var result *rpcBlock
+	if err := c.call(ctx, "eth_getBlockByNumber", []any{formatHexUint(blockNumber), true}, &result); err != nil {
+		return domain.BlockRecord{}, nil, false, err
+	}
+	if result == nil || result.Hash == "" {
+		return domain.BlockRecord{}, nil, false, nil
+	}
+
+	timestamp, err := parseHexUint(result.Timestamp)
+	if err != nil {
+		return domain.BlockRecord{}, nil, false, err
+	}
+	gasLimit, err := parseHexUint(result.GasLimit)
+	if err != nil {
+		return domain.BlockRecord{}, nil, false, err
+	}
+	gasUsed, err := parseHexUint(result.GasUsed)
+	if err != nil {
+		return domain.BlockRecord{}, nil, false, err
+	}
+
+	transactions := make([]domain.Transaction, 0, len(result.Transactions))
+	for _, tx := range result.Transactions {
+		txIndex, err := parseHexUintOptional(tx.TransactionIndex)
+		if err != nil {
+			return domain.BlockRecord{}, nil, false, err
+		}
+		nonce, err := parseHexUintOptional(tx.Nonce)
+		if err != nil {
+			return domain.BlockRecord{}, nil, false, err
+		}
+		gas, err := parseHexUintOptional(tx.Gas)
+		if err != nil {
+			return domain.BlockRecord{}, nil, false, err
+		}
+		value, err := parseHexBigIntString(tx.Value)
+		if err != nil {
+			return domain.BlockRecord{}, nil, false, err
+		}
+		gasPrice, err := parseHexBigIntString(tx.GasPrice)
+		if err != nil {
+			return domain.BlockRecord{}, nil, false, err
+		}
+		txType, err := parseHexUintOptional(tx.Type)
+		if err != nil {
+			return domain.BlockRecord{}, nil, false, err
+		}
+
+		transactions = append(transactions, domain.Transaction{
+			ChainID:     chainID,
+			TxHash:      strings.ToLower(tx.Hash),
+			BlockNumber: blockNumber,
+			BlockHash:   strings.ToLower(result.Hash),
+			TxIndex:     txIndex,
+			From:        strings.ToLower(tx.From),
+			To:          strings.ToLower(tx.To),
+			Value:       value,
+			Nonce:       nonce,
+			Gas:         gas,
+			GasPrice:    gasPrice,
+			Input:       tx.Input,
+			TxType:      txType,
+		})
+	}
+
+	return domain.BlockRecord{
+		ChainID:     chainID,
+		BlockNumber: blockNumber,
+		BlockHash:   strings.ToLower(result.Hash),
+		ParentHash:  strings.ToLower(result.ParentHash),
+		Timestamp:   timestamp,
+		GasLimit:    gasLimit,
+		GasUsed:     gasUsed,
+		TxCount:     uint64(len(result.Transactions)),
+	}, transactions, true, nil
+}
+
+func (c *Client) TransactionReceipt(ctx context.Context, txHash string) (domain.Receipt, bool, error) {
+	chainID, err := c.fetchChainID(ctx)
+	if err != nil {
+		return domain.Receipt{}, false, err
+	}
+
+	var result *rpcReceipt
+	if err := c.call(ctx, "eth_getTransactionReceipt", []any{txHash}, &result); err != nil {
+		return domain.Receipt{}, false, err
+	}
+	if result == nil || result.TransactionHash == "" {
+		return domain.Receipt{}, false, nil
+	}
+
+	blockNumber, err := parseHexUintOptional(result.BlockNumber)
+	if err != nil {
+		return domain.Receipt{}, false, err
+	}
+	txIndex, err := parseHexUintOptional(result.TransactionIndex)
+	if err != nil {
+		return domain.Receipt{}, false, err
+	}
+	status, err := parseHexUintOptional(result.Status)
+	if err != nil {
+		return domain.Receipt{}, false, err
+	}
+	cumulativeGasUsed, err := parseHexUintOptional(result.CumulativeGasUsed)
+	if err != nil {
+		return domain.Receipt{}, false, err
+	}
+	gasUsed, err := parseHexUintOptional(result.GasUsed)
+	if err != nil {
+		return domain.Receipt{}, false, err
+	}
+	effectiveGasPrice, err := parseHexBigIntString(result.EffectiveGasPrice)
+	if err != nil {
+		return domain.Receipt{}, false, err
+	}
+
+	return domain.Receipt{
+		ChainID:           chainID,
+		TxHash:            strings.ToLower(result.TransactionHash),
+		BlockNumber:       blockNumber,
+		BlockHash:         strings.ToLower(result.BlockHash),
+		TxIndex:           txIndex,
+		Status:            status,
+		CumulativeGasUsed: cumulativeGasUsed,
+		GasUsed:           gasUsed,
+		ContractAddress:   strings.ToLower(result.ContractAddress),
+		LogsBloom:         result.LogsBloom,
+		EffectiveGasPrice: effectiveGasPrice,
+	}, true, nil
+}
+
 func (c *Client) FetchLogs(ctx context.Context, fromBlock, toBlock uint64) ([]domain.LogEntry, error) {
 	chainID, err := c.fetchChainID(ctx)
 	if err != nil {
@@ -140,6 +278,44 @@ type rpcLog struct {
 	TxHash      string   `json:"transactionHash"`
 	LogIndex    string   `json:"logIndex"`
 	Removed     bool     `json:"removed"`
+}
+
+type rpcTransaction struct {
+	Hash             string `json:"hash"`
+	BlockHash        string `json:"blockHash"`
+	BlockNumber      string `json:"blockNumber"`
+	TransactionIndex string `json:"transactionIndex"`
+	From             string `json:"from"`
+	To               string `json:"to"`
+	Value            string `json:"value"`
+	Nonce            string `json:"nonce"`
+	Gas              string `json:"gas"`
+	GasPrice         string `json:"gasPrice"`
+	Input            string `json:"input"`
+	Type             string `json:"type"`
+}
+
+type rpcBlock struct {
+	Hash         string           `json:"hash"`
+	ParentHash   string           `json:"parentHash"`
+	Number       string           `json:"number"`
+	Timestamp    string           `json:"timestamp"`
+	GasLimit     string           `json:"gasLimit"`
+	GasUsed      string           `json:"gasUsed"`
+	Transactions []rpcTransaction `json:"transactions"`
+}
+
+type rpcReceipt struct {
+	TransactionHash   string `json:"transactionHash"`
+	BlockHash         string `json:"blockHash"`
+	BlockNumber       string `json:"blockNumber"`
+	TransactionIndex  string `json:"transactionIndex"`
+	Status            string `json:"status"`
+	CumulativeGasUsed string `json:"cumulativeGasUsed"`
+	GasUsed           string `json:"gasUsed"`
+	ContractAddress   string `json:"contractAddress"`
+	LogsBloom         string `json:"logsBloom"`
+	EffectiveGasPrice string `json:"effectiveGasPrice"`
 }
 
 type rpcRequest struct {
@@ -267,6 +443,25 @@ func parseHexUint(value string) (uint64, error) {
 		return 0, errors.New("empty hex value")
 	}
 	return strconv.ParseUint(trimmed, 16, 64)
+}
+
+func parseHexUintOptional(value string) (uint64, error) {
+	if value == "" {
+		return 0, nil
+	}
+	return parseHexUint(value)
+}
+
+func parseHexBigIntString(value string) (string, error) {
+	trimmed := strings.TrimPrefix(value, "0x")
+	if trimmed == "" {
+		return "0", nil
+	}
+	n := new(big.Int)
+	if _, ok := n.SetString(trimmed, 16); !ok {
+		return "", errors.New("invalid hex big int")
+	}
+	return n.String(), nil
 }
 
 func formatHexUint(value uint64) string {

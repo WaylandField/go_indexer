@@ -13,6 +13,7 @@ type Config struct {
 	RPCURL            string
 	DBDSN             string
 	StateDBDSN        string
+	ClickhouseDSN     string
 	HTTPAddr          string
 	RedisAddr         string
 	OtelEndpoint      string
@@ -107,6 +108,11 @@ func Load(source EnvSource) (Config, error) {
 		stateDBDSN = raw
 	}
 
+	clickhouseDSN, ok := source.Lookup("CLICKHOUSE_DSN")
+	if !ok || strings.TrimSpace(clickhouseDSN) == "" {
+		clickhouseDSN = "clickhouse://127.0.0.1:9000?database=bcindex"
+	}
+
 	httpAddr := ":8080"
 	if raw, ok := source.Lookup("HTTP_ADDR"); ok && raw != "" {
 		httpAddr = raw
@@ -144,6 +150,7 @@ func Load(source EnvSource) (Config, error) {
 		RPCURL:            rpcURL,
 		DBDSN:             dbDSN,
 		StateDBDSN:        stateDBDSN,
+		ClickhouseDSN:     clickhouseDSN,
 		HTTPAddr:          httpAddr,
 		RedisAddr:         redisAddr,
 		OtelEndpoint:      otelEndpoint,

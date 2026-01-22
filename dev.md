@@ -15,3 +15,5 @@ curl http://127.0.0.1:8080/metrics
 curl -X POST "http://127.0.0.1:8080/reindex?from_block=0"
 
 curl "http://127.0.0.1:8080//balances"
+
+# Logs are stored in ClickHouse via CLICKHOUSE_DSN.
