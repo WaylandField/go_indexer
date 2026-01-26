@@ -1,10 +1,10 @@
 .PHONY: dev prod test testbench build ordering compute hardhat-deploy deploy-contract build-abi emit-logs fetch-logs fetch-hardhat-logs
 
 dev:
-	go run -tags=dev ./cmd/indexer
+	go run -tags=dev ./cmd/computing
 
 prod:
-	go run ./cmd/indexer
+	go run ./cmd/computing
 
 test:
 	go test ./...
@@ -13,13 +13,14 @@ testbench:
 	go test -bench ./...
 
 build:
-	go build -o bin/indexer ./cmd/indexer
+	go build -o bin/computing ./cmd/computing
+	go build -o bin/ordering ./cmd/ordering
 
 ordering:
 	go run -tags=dev ./cmd/ordering
 
 compute:
-	go run -tags=dev ./cmd/indexer
+	go run -tags=dev ./cmd/computing
 
 hardhat-deploy:
 	yarn deploy
