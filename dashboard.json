@@ -1,0 +1,228 @@
+{
+    "uid": "bcindex-overview",
+    "title": "bcindex Overview",
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "version": 1,
+    "refresh": "10s",
+    "tags": ["bcindex", "indexer"],
+    "templating": {
+      "list": [
+        {
+          "name": "DS_PROMETHEUS",
+          "type": "datasource",
+          "query": "prometheus",
+          "current": { "text": "Prometheus", "value": "Prometheus" }
+        },
+        {
+          "name": "topic",
+          "type": "query",
+          "datasource": "${DS_PROMETHEUS}",
+          "query": "label_values(bcindex_kafka_topic_messages_total, topic)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true
+        },
+        {
+          "name": "partition",
+          "type": "query",
+          "datasource": "${DS_PROMETHEUS}",
+          "query": "label_values(bcindex_kafka_partition_messages_total, partition)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true
+        }
+      ]
+    },
+    "panels": [
+      {
+        "type": "stat",
+        "title": "Uptime (s)",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_uptime_seconds", "refId": "A" }],
+        "fieldConfig": { "defaults": { "unit": "s", "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Latest Block",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_latest_block", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Last Processed Block",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_last_processed_block", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Block Lag",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_block_lag", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+
+      {
+        "type": "stat",
+        "title": "Last Batch From",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 0, "y": 4, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_last_batch_from", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Last Batch To",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 6, "y": 4, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_last_batch_to", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Last Batch Count",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 12, "y": 4, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_last_batch_count", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Logs Total",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 18, "y": 4, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_logs_total", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+
+      {
+        "type": "stat",
+        "title": "Kafka Messages Total",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 0, "y": 8, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_kafka_messages_total", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Kafka Decode Errors",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 6, "y": 8, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_kafka_decode_errors_total", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Kafka Apply Errors",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 12, "y": 8, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_kafka_apply_errors_total", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Kafka Commit Errors",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 18, "y": 8, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_kafka_commit_errors_total", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+
+      {
+        "type": "timeSeries",
+        "title": "Kafka Last Lag (s)",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 0, "y": 12, "w": 12, "h": 6 },
+        "targets": [{ "expr": "bcindex_kafka_last_lag_seconds", "refId": "A" }],
+        "fieldConfig": { "defaults": { "unit": "s" } }
+      },
+      {
+        "type": "timeSeries",
+        "title": "Kafka Max Lag (s)",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 12, "y": 12, "w": 12, "h": 6 },
+        "targets": [{ "expr": "bcindex_kafka_max_lag_seconds", "refId": "A" }],
+        "fieldConfig": { "defaults": { "unit": "s" } }
+      },
+
+      {
+        "type": "stat",
+        "title": "Kafka Last Offset",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 0, "y": 18, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_kafka_last_offset", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Kafka Last Bytes",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 6, "y": 18, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_kafka_last_bytes", "refId": "A" }],
+        "fieldConfig": { "defaults": { "unit": "bytes", "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Kafka Last Partition",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 12, "y": 18, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_kafka_last_partition", "refId": "A" }],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "stat",
+        "title": "Kafka Last Timestamp",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 18, "y": 18, "w": 6, "h": 4 },
+        "targets": [{ "expr": "bcindex_kafka_last_timestamp_seconds", "refId": "A" }],
+        "fieldConfig": { "defaults": { "unit": "unixtime_s" } }
+      },
+
+      {
+        "type": "timeSeries",
+        "title": "Kafka Topic Messages Total",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 0, "y": 22, "w": 12, "h": 6 },
+        "targets": [
+          {
+            "expr": "bcindex_kafka_topic_messages_total{topic=~\"$topic\"}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "timeSeries",
+        "title": "Kafka Partition Messages Total",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 12, "y": 22, "w": 12, "h": 6 },
+        "targets": [
+          {
+            "expr": "bcindex_kafka_partition_messages_total{topic=~\"$topic\",partition=~\"$partition\"}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": { "defaults": { "decimals": 0 } }
+      },
+      {
+        "type": "timeSeries",
+        "title": "Kafka Partition Max Lag (s)",
+        "datasource": "${DS_PROMETHEUS}",
+        "gridPos": { "x": 0, "y": 28, "w": 12, "h": 6 },
+        "targets": [
+          {
+            "expr": "bcindex_kafka_partition_max_lag_seconds{topic=~\"$topic\",partition=~\"$partition\"}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": { "defaults": { "unit": "s" } }
+      }
+    ],
+    "time": { "from": "now-6h", "to": "now" }
+  }

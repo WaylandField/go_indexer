@@ -17,6 +17,10 @@ type Config struct {
 	HTTPAddr          string
 	RedisAddr         string
 	OtelEndpoint      string
+	LogLevel          string
+	LogFile           string
+	LogMaxSizeMB      int
+	LogMaxBackups     int
 	ContractAddress   string
 	Topic0            string
 	StartBlock        uint64
@@ -126,6 +130,20 @@ func Load(source EnvSource) (Config, error) {
 	otelEndpoint, _ := source.Lookup("OTEL_EXPORTER_OTLP_ENDPOINT")
 	otelEndpoint = strings.TrimSpace(otelEndpoint)
 
+	logLevel := "info"
+	if raw, ok := source.Lookup("LOG_LEVEL"); ok && strings.TrimSpace(raw) != "" {
+		logLevel = strings.TrimSpace(raw)
+	}
+	logFile, _ := source.Lookup("LOG_FILE")
+	logMaxSizeMB, err := parseIntEnv(source, "LOG_MAX_SIZE_MB", 100)
+	if err != nil {
+		return Config{}, err
+	}
+	logMaxBackups, err := parseIntEnv(source, "LOG_MAX_BACKUPS", 7)
+	if err != nil {
+		return Config{}, err
+	}
+
 	contractAddress, _ := source.Lookup("CONTRACT_ADDRESS")
 	topic0, _ := source.Lookup("TOPIC0")
 
@@ -154,6 +172,10 @@ func Load(source EnvSource) (Config, error) {
 		HTTPAddr:          httpAddr,
 		RedisAddr:         redisAddr,
 		OtelEndpoint:      otelEndpoint,
+		LogLevel:          logLevel,
+		LogFile:           strings.TrimSpace(logFile),
+		LogMaxSizeMB:      logMaxSizeMB,
+		LogMaxBackups:     logMaxBackups,
 		ContractAddress:   contractAddress,
 		Topic0:            topic0,
 		StartBlock:        startBlock,
@@ -220,4 +242,16 @@ func parseUintList(source EnvSource, key string) ([]uint64, error) {
 		values = append(values, parsed)
 	}
 	return values, nil
+}
+
+func parseIntEnv(source EnvSource, key string, defaultValue int) (int, error) {
+	raw, ok := source.Lookup(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return defaultValue, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
+	}
+	return value, nil
 }
